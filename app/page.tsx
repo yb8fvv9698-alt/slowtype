@@ -80,6 +80,7 @@ export default function Home() {
   const [screen, setScreen] = useState<Screen>("hero");
   const [docs, setDocs] = useState<Doc[]>([]);
   const [docsLoading, setDocsLoading] = useState(false);
+  const [docsError, setDocsError] = useState("");
   const [selectedDoc, setSelectedDoc] = useState<Doc | null>(null);
   const [text, setText] = useState("");
   const [duration, setDuration] = useState<number | null>(null);
@@ -104,14 +105,18 @@ export default function Home() {
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (session && screen === "docs" && docs.length === 0) {
+    if (session && screen === "docs" && docs.length === 0 && !docsError) {
       setDocsLoading(true);
       fetch("/api/docs").then(r => r.json()).then(d => {
-        setDocs(d.files || []);
+        if (d.error) {
+          setDocsError(d.error);
+        } else {
+          setDocs(d.files || []);
+        }
         setDocsLoading(false);
-      }).catch(() => setDocsLoading(false));
+      }).catch(() => { setDocsError("Couldn't reach the server. Try again."); setDocsLoading(false); });
     }
-  }, [session, screen]);
+  }, [session, screen, docsError]);
 
   const typeNextChar = useCallback(async () => {
     if (!runningRef.current) return;
@@ -258,7 +263,13 @@ export default function Home() {
           <div style={s.cardHead}><div style={s.cardIcon}>📄</div><div><div style={s.cardTitle}>Pick your document</div><div style={s.cardSub}>Which doc should we type into?</div></div></div>
           <div style={s.cardBody}>
             {docsLoading && <p style={{ textAlign: "center", padding: "32px 0", color: C.muted }}>Loading your docs…</p>}
-            {!docsLoading && docs.length === 0 && <p style={{ textAlign: "center", padding: "32px 0", color: C.muted }}>No Google Docs found.</p>}
+            {!docsLoading && docsError && (
+              <div style={{ textAlign: "center", padding: "24px 0" }}>
+                <p style={{ color: "#9a3020", fontSize: 15, marginBottom: 16, lineHeight: 1.6 }}>⚠️ {docsError}</p>
+                <button style={s.startBtn(true)} onClick={() => signOut({ callbackUrl: "/" })}>Sign out & try again</button>
+              </div>
+            )}
+            {!docsLoading && !docsError && docs.length === 0 && <p style={{ textAlign: "center", padding: "32px 0", color: C.muted }}>No Google Docs found. Create one at docs.google.com first!</p>}
             {docs.map(doc => (
               <div key={doc.id} style={s.docItem(selectedDoc?.id === doc.id)} onClick={() => setSelectedDoc(doc)}>
                 <span style={{ fontSize: 24 }}>📄</span>
