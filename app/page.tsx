@@ -144,7 +144,7 @@ export default function Home() {
       if (data.error) { setError(data.error); setRunning(false); runningRef.current = false; return; }
 
       charIndexRef.current = idx + 1;
-      docIndexRef.current = docIndexRef.current + 1;
+      docIndexRef.current = docIndexRef.current + 1; // advance one position in doc for next char
       setCharIndex(idx + 1);
     } catch (e) {
       // retry on network error

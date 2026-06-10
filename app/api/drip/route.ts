@@ -3,7 +3,6 @@ import { authOptions } from "../auth/[...nextauth]/route";
 import { google } from "googleapis";
 import { NextRequest, NextResponse } from "next/server";
 
-// POST: insert a single character at a given index
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   const accessToken = (session as any)?.accessToken;
@@ -19,24 +18,19 @@ export async function POST(req: NextRequest) {
     auth.setCredentials({ access_token: accessToken });
     const docs = google.docs({ version: "v1", auth });
 
-    if (char === "\n") {
-      await docs.documents.batchUpdate({
-        documentId: docId,
-        requestBody: { requests: [{ insertText: { location: { index: index + 1 }, text: "\n" } }] },
-      });
-    } else {
-      await docs.documents.batchUpdate({
-        documentId: docId,
-        requestBody: { requests: [{ insertText: { location: { index: index + 1 }, text: char } }] },
-      });
-    }
+    const insertAt = Math.max(1, index);
+    await docs.documents.batchUpdate({
+      documentId: docId,
+      requestBody: {
+        requests: [{ insertText: { location: { index: insertAt }, text: char } }]
+      },
+    });
     return NextResponse.json({ ok: true });
   } catch (e: any) {
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
 
-// GET: get the current end index of a doc so we know where to start inserting
 export async function GET(req: NextRequest) {
   const session = await getServerSession(authOptions);
   const accessToken = (session as any)?.accessToken;
@@ -53,17 +47,22 @@ export async function GET(req: NextRequest) {
     const doc = await docs.documents.get({ documentId: docId });
     const content = doc.data.body?.content || [];
     const lastEl = content[content.length - 1];
-    const endIndex = lastEl?.endIndex ?? 1;
+    const endIndex = lastEl?.endIndex ?? 2;
 
+    // For empty doc endIndex is 2, for docs with content it's higher
+    // We insert BEFORE the final newline, so endIndex - 1, minimum 1
     let startIndex = 1;
-    if (position === "end") startIndex = Math.max(1, endIndex - 1);
-    else if (position === "newpage") {
+    if (position === "end") {
+      startIndex = endIndex <= 2 ? 1 : endIndex - 1;
+    } else if (position === "newpage") {
+      const insertPos = endIndex <= 2 ? 1 : endIndex - 1;
       await docs.documents.batchUpdate({
         documentId: docId,
-        requestBody: { requests: [{ insertPageBreak: { location: { index: Math.max(1, endIndex - 1) } } }] },
+        requestBody: { requests: [{ insertPageBreak: { location: { index: insertPos } } }] },
       });
-      startIndex = endIndex;
+      startIndex = insertPos + 1;
     }
+    // "beginning" keeps startIndex = 1
 
     return NextResponse.json({ startIndex });
   } catch (e: any) {
