@@ -58,6 +58,11 @@ const s: Record<string, any> = {
   googleDot: { width: 24, height: 24, borderRadius: "50%", background: C.amber, color: C.dark, fontSize: 13, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center" },
   signinNote: { fontSize: 13, color: C.muted, textAlign: "center", marginTop: 14, lineHeight: 1.6 },
   errorBox: { background: "#fde8e8", border: "1px solid #f4a8a8", borderRadius: 8, padding: "10px 14px", fontSize: 13, color: "#7a1a1a", marginTop: 12 },
+  sliderRow: { marginBottom: 18 },
+  sliderLabels: { display: "flex", justifyContent: "space-between", fontSize: 11, color: C.muted, marginTop: 2 },
+  slider: { width: "100%", accentColor: C.amber, cursor: "pointer", display: "block" },
+  preview: { background: C.softBg, borderRadius: 10, padding: "11px 14px", fontSize: 13, color: C.brown, lineHeight: 1.55, marginBottom: 18 },
+  breakPulse: { width: 10, height: 10, borderRadius: "50%", background: "#c8a870", animation: "pulse 1.4s ease-in-out infinite", flexShrink: 0 },
 };
 
 type Screen = "hero" | "docs" | "setup" | "running";
@@ -75,6 +80,13 @@ function getDelay(base: number, char: string, feel: string): number {
   return base * (0.75 + Math.random() * 0.8);
 }
 
+function formatMMSS(ms: number): string {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(total / 60);
+  const sec = total % 60;
+  return `${m}:${sec.toString().padStart(2, "0")}`;
+}
+
 export default function Home() {
   const { data: session, status } = useSession();
   const [screen, setScreen] = useState<Screen>("hero");
@@ -86,6 +98,8 @@ export default function Home() {
   const [duration, setDuration] = useState<number | null>(null);
   const [position, setPosition] = useState("end");
   const [feel, setFeel] = useState("natural");
+  const [burstSpeed, setBurstSpeed] = useState(150); // ms per character during a burst
+  const [breakLength, setBreakLength] = useState(3); // minutes per break
   const [charIndex, setCharIndex] = useState(0);
   const [docIndex, setDocIndex] = useState(0); // position in the actual doc
   const [totalChars, setTotalChars] = useState(0);
@@ -93,6 +107,8 @@ export default function Home() {
   const [paused, setPaused] = useState(false);
   const [done, setDone] = useState(false);
   const [error, setError] = useState("");
+  const [onBreak, setOnBreak] = useState(false);
+  const [breakRemaining, setBreakRemaining] = useState(0); // ms
 
   const runningRef = useRef(false);
   const pausedRef = useRef(false);
@@ -103,6 +119,12 @@ export default function Home() {
   const feelRef = useRef("natural");
   const docIdRef = useRef("");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onBreakRef = useRef(false);
+  const breakRemainingRef = useRef(0);
+  const chunkCharsRef = useRef(0);
+  const charsPerChunkRef = useRef(0);
+  const perCharMsRef = useRef(150);
+  const breakMsRef = useRef(180000);
 
   useEffect(() => {
     if (session && screen === "docs" && docs.length === 0 && !docsError) {
@@ -125,6 +147,23 @@ export default function Home() {
       return;
     }
 
+    // Burst mode: handle break countdown
+    if (feelRef.current === "bursts" && onBreakRef.current) {
+      const remaining = breakRemainingRef.current - 1000;
+      if (remaining <= 0) {
+        onBreakRef.current = false;
+        chunkCharsRef.current = 0;
+        setOnBreak(false);
+        setBreakRemaining(0);
+        timerRef.current = setTimeout(typeNextChar, 400);
+      } else {
+        breakRemainingRef.current = remaining;
+        setBreakRemaining(remaining);
+        timerRef.current = setTimeout(typeNextChar, 1000);
+      }
+      return;
+    }
+
     const idx = charIndexRef.current;
     const txt = textRef.current;
 
@@ -136,8 +175,13 @@ export default function Home() {
     }
 
     const char = txt[idx];
-    const base = Math.max(Math.floor((durationRef.current * 60 * 1000) / txt.length), 300);
-    const delay = getDelay(base, char, feelRef.current);
+    let delay: number;
+    if (feelRef.current === "bursts") {
+      delay = perCharMsRef.current * (0.7 + Math.random() * 0.6);
+    } else {
+      const base = Math.max(Math.floor((durationRef.current * 60 * 1000) / txt.length), 300);
+      delay = getDelay(base, char, feelRef.current);
+    }
 
     try {
       const res = await fetch("/api/drip", {
@@ -153,6 +197,24 @@ export default function Home() {
       setCharIndex(idx + 1);
     } catch (e) {
       // retry on network error
+    }
+
+    // Burst mode: decide whether to start a break (at a word boundary)
+    if (feelRef.current === "bursts") {
+      chunkCharsRef.current += 1;
+      const nextIdx = idx + 1;
+      const hasMore = nextIdx < txt.length;
+      const reachedChunk = chunkCharsRef.current >= charsPerChunkRef.current;
+      const atWordBoundary = char === " " || char === "\n";
+
+      if (hasMore && reachedChunk && atWordBoundary && breakMsRef.current > 0) {
+        onBreakRef.current = true;
+        breakRemainingRef.current = breakMsRef.current;
+        setOnBreak(true);
+        setBreakRemaining(breakMsRef.current);
+        timerRef.current = setTimeout(typeNextChar, 1000);
+        return;
+      }
     }
 
     timerRef.current = setTimeout(typeNextChar, delay);
@@ -175,6 +237,24 @@ export default function Home() {
     docIndexRef.current = r.startIndex;
     runningRef.current = true;
     pausedRef.current = false;
+
+    // Burst mode setup: compute chunk size + break length to fit total duration
+    onBreakRef.current = false;
+    chunkCharsRef.current = 0;
+    setOnBreak(false);
+    setBreakRemaining(0);
+    if (feel === "bursts") {
+      const perCharMs = burstSpeed;
+      const breakMs = breakLength * 60000;
+      const totalDurationMs = duration * 60000;
+      const estimatedTypingMs = trimmed.length * perCharMs;
+      const availableBreakMs = Math.max(0, totalDurationMs - estimatedTypingMs);
+      const numBreaks = breakMs > 0 ? Math.floor(availableBreakMs / breakMs) : 0;
+      const numChunks = numBreaks + 1;
+      perCharMsRef.current = perCharMs;
+      breakMsRef.current = breakMs;
+      charsPerChunkRef.current = Math.max(1, Math.ceil(trimmed.length / numChunks));
+    }
 
     setTotalChars(trimmed.length);
     setCharIndex(0);
@@ -202,6 +282,26 @@ export default function Home() {
   const pct = totalChars ? Math.round((charIndex / totalChars) * 100) : 0;
   const minsLeft = duration && totalChars ? Math.ceil(((totalChars - charIndex) / totalChars) * duration) : 0;
   const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+
+  const burstPreview = (() => {
+    const trimmed = text.trim();
+    if (!trimmed || !duration) return "Type your text and pick a duration to see a preview.";
+    const totalC = trimmed.length;
+    const perCharMs = burstSpeed;
+    const breakMs = breakLength * 60000;
+    const totalDurationMs = duration * 60000;
+    const estimatedTypingMs = totalC * perCharMs;
+    const availableBreakMs = Math.max(0, totalDurationMs - estimatedTypingMs);
+    const numBreaks = breakMs > 0 ? Math.floor(availableBreakMs / breakMs) : 0;
+    if (numBreaks <= 0) {
+      const mins = Math.max(1, Math.ceil(estimatedTypingMs / 60000));
+      return `At this speed, typing straight through takes about ${mins} min — too quick for breaks within ${duration} min. Slow the typing speed or pick a longer duration for breaks.`;
+    }
+    const numChunks = numBreaks + 1;
+    const charsPerChunk = Math.ceil(totalC / numChunks);
+    const wordsPerChunk = Math.max(1, Math.round(charsPerChunk / 5));
+    return `≈ ${numChunks} bursts of about ${wordsPerChunk} word${wordsPerChunk === 1 ? "" : "s"} each, with a ${breakLength}-minute break in between — fitting your ${duration < 60 ? duration + " min" : (duration / 60) + " hr"} total.`;
+  })();
 
   const Nav = () => (
     <nav style={s.nav}>
@@ -321,7 +421,24 @@ export default function Home() {
               <option value="natural">Natural — speeds up and slows down</option>
               <option value="steady">Steady — even pace throughout</option>
               <option value="slow">Slow & deliberate — long pauses</option>
+              <option value="bursts">Bursts — type fast, then take breaks</option>
             </select>
+
+            {feel === "bursts" && (
+              <>
+                <div style={s.sliderRow}>
+                  <label style={s.label}>Typing speed — about {Math.round(60000 / (burstSpeed * 5))} WPM</label>
+                  <input type="range" min={50} max={350} step={10} value={burstSpeed} onChange={e => setBurstSpeed(Number(e.target.value))} style={s.slider} />
+                  <div style={s.sliderLabels}><span>Fast</span><span>Relaxed</span></div>
+                </div>
+                <div style={s.sliderRow}>
+                  <label style={s.label}>Break length — {breakLength} min</label>
+                  <input type="range" min={0.5} max={10} step={0.5} value={breakLength} onChange={e => setBreakLength(Number(e.target.value))} style={s.slider} />
+                  <div style={s.sliderLabels}><span>Short</span><span>Long</span></div>
+                </div>
+                <div style={s.preview}>☕ {burstPreview}</div>
+              </>
+            )}
 
             {error && <div style={s.errorBox}>⚠️ {error}</div>}
             <button style={s.startBtn(!!(text.trim() && duration))} disabled={!text.trim() || !duration} onClick={startDrip}>
@@ -343,9 +460,16 @@ export default function Home() {
           <div style={s.cardHead}><div style={s.cardIcon}>{done ? "🎉" : "🐢"}</div><div><div style={s.cardTitle}>{done ? "All done!" : "SlowType is running"}</div><div style={{ ...s.cardSub, maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{selectedDoc?.name}</div></div></div>
           <div style={s.cardBody}>
             <div style={s.runRow}>
-              {!done && <div style={s.pulse} />}
-              <span style={{ fontWeight: 700, fontSize: 15, color: C.dark }}>{done ? "Every character is in your doc!" : paused ? "Paused" : "Typing your text…"}</span>
-              {!done && <span style={{ marginLeft: "auto", fontSize: 13, color: C.muted }}>{minsLeft > 0 ? `~${minsLeft} min left` : "finishing…"}</span>}
+              {!done && !onBreak && <div style={s.pulse} />}
+              {!done && onBreak && <div style={s.breakPulse} />}
+              <span style={{ fontWeight: 700, fontSize: 15, color: C.dark }}>
+                {done ? "Every character is in your doc!" : onBreak ? "☕ Taking a break…" : paused ? "Paused" : "Typing your text…"}
+              </span>
+              {!done && (
+                <span style={{ marginLeft: "auto", fontSize: 13, color: C.muted }}>
+                  {onBreak ? `back in ${formatMMSS(breakRemaining)}` : (minsLeft > 0 ? `~${minsLeft} min left` : "finishing…")}
+                </span>
+              )}
             </div>
             <div style={s.progTrack}><div style={s.progFill(pct)} /></div>
             <div style={s.pctRow}>
@@ -360,7 +484,7 @@ export default function Home() {
                   <button style={s.pauseBtn} onClick={togglePause}>{paused ? "▶ Resume" : "⏸ Pause"}</button>
                   <button style={s.stopBtn} onClick={stopDrip}>⏹ Stop</button>
                 </div>
-                <div style={s.tip}>⚠️ Keep this tab open — SlowType runs in your browser. You can minimize the window but don't close this tab!</div>
+                <div style={s.tip}>{onBreak ? "☕ Pausing for a bit, just like a real person would — typing resumes automatically. Keep this tab open!" : "⚠️ Keep this tab open — SlowType runs in your browser. You can minimize the window but don't close this tab!"}</div>
               </>
             ) : (
               <button style={s.startBtn(true)} onClick={() => { setScreen("setup"); setText(""); setDuration(null); setDone(false); }}>Type something else →</button>
