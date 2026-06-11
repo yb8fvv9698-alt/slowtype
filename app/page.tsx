@@ -63,6 +63,10 @@ const s: Record<string, any> = {
   slider: { width: "100%", accentColor: C.amber, cursor: "pointer", display: "block" },
   preview: { background: C.softBg, borderRadius: 10, padding: "11px 14px", fontSize: 13, color: C.brown, lineHeight: 1.55, marginBottom: 18 },
   breakPulse: { width: 10, height: 10, borderRadius: "50%", background: "#c8a870", animation: "pulse 1.4s ease-in-out infinite", flexShrink: 0 },
+  checkpointWrap: { marginBottom: 16 },
+  checkpointRow: { display: "flex", flexWrap: "wrap", gap: 8 },
+  checkpointBtn: { padding: "9px 16px", border: `1.5px solid ${C.border}`, borderRadius: 9, background: C.cream, color: C.dark, fontSize: 14, fontWeight: 700, cursor: "pointer" },
+  confirmBox: { background: "#fff4e0", border: "1px solid #f0c878", borderRadius: 10, padding: "14px 16px", marginBottom: 16, fontSize: 14, color: "#6a4a14", lineHeight: 1.6 },
 };
 
 type Screen = "hero" | "docs" | "setup" | "running";
@@ -109,11 +113,16 @@ export default function Home() {
   const [error, setError] = useState("");
   const [onBreak, setOnBreak] = useState(false);
   const [breakRemaining, setBreakRemaining] = useState(0); // ms
+  const [checkpoints, setCheckpoints] = useState<{ pct: number; charIndex: number; time: number }[]>([]);
+  const [confirmRestore, setConfirmRestore] = useState<number | null>(null); // pct
+  const [restoring, setRestoring] = useState(false);
 
   const runningRef = useRef(false);
   const pausedRef = useRef(false);
   const charIndexRef = useRef(0);
   const docIndexRef = useRef(0);
+  const startIndexRef = useRef(0);
+  const lastCheckpointPctRef = useRef(0);
   const textRef = useRef("");
   const durationRef = useRef(0);
   const feelRef = useRef("natural");
@@ -195,6 +204,15 @@ export default function Home() {
       charIndexRef.current = idx + 1;
       docIndexRef.current = docIndexRef.current + 1; // advance one position in doc for next char
       setCharIndex(idx + 1);
+
+      // Save a checkpoint every 10% so the person can go back if they change their mind
+      const newPct = Math.floor(((idx + 1) / txt.length) * 100);
+      const decile = Math.floor(newPct / 10) * 10;
+      if (decile > lastCheckpointPctRef.current && decile > 0 && decile < 100) {
+        lastCheckpointPctRef.current = decile;
+        const snapshot = { pct: decile, charIndex: idx + 1, time: Date.now() };
+        setCheckpoints(cps => [...cps, snapshot]);
+      }
     } catch (e) {
       // retry on network error
     }
@@ -235,6 +253,10 @@ export default function Home() {
     docIdRef.current = selectedDoc.id;
     charIndexRef.current = 0;
     docIndexRef.current = r.startIndex;
+    startIndexRef.current = r.startIndex;
+    lastCheckpointPctRef.current = 0;
+    setCheckpoints([]);
+    setConfirmRestore(null);
     runningRef.current = true;
     pausedRef.current = false;
 
@@ -277,6 +299,48 @@ export default function Home() {
     if (timerRef.current) clearTimeout(timerRef.current);
     setRunning(false);
     setScreen("setup");
+  }
+
+  async function restoreToCheckpoint(cp: { pct: number; charIndex: number }) {
+    setRestoring(true);
+    if (timerRef.current) clearTimeout(timerRef.current);
+
+    const fromIndex = startIndexRef.current + cp.charIndex;
+    const toIndex = startIndexRef.current + charIndexRef.current;
+
+    try {
+      const res = await fetch("/api/checkpoint", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ docId: docIdRef.current, fromIndex, toIndex }),
+      });
+      const data = await res.json();
+      if (data.error) { setError(data.error); setRestoring(false); return; }
+
+      charIndexRef.current = cp.charIndex;
+      docIndexRef.current = fromIndex;
+      lastCheckpointPctRef.current = cp.pct;
+      onBreakRef.current = false;
+      chunkCharsRef.current = 0;
+
+      setCharIndex(cp.charIndex);
+      setOnBreak(false);
+      setBreakRemaining(0);
+      setCheckpoints(cps => cps.filter(c => c.pct <= cp.pct));
+      setError("");
+      setDone(false);
+      runningRef.current = true;
+      setRunning(true);
+      pausedRef.current = true;
+      setPaused(true);
+
+      // Restart the loop in a paused state so "Resume" works afterward
+      timerRef.current = setTimeout(typeNextChar, 500);
+    } catch (e) {
+      setError("Couldn't go back — check your connection and try again.");
+    }
+    setRestoring(false);
+    setConfirmRestore(null);
   }
 
   const pct = totalChars ? Math.round((charIndex / totalChars) * 100) : 0;
@@ -477,6 +541,33 @@ export default function Home() {
               <span>{pct}%</span>
             </div>
             <div style={s.badge}>📄 <strong style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{selectedDoc?.name}</strong><span style={{ opacity: 0.6, flexShrink: 0 }}>· {duration} {(duration ?? 0) < 60 ? "min" : "hr"}</span></div>
+
+            {checkpoints.length > 0 && (
+              <div style={s.checkpointWrap}>
+                <label style={s.label}>Not happy with how it looks? Go back to an earlier point</label>
+                <div style={s.checkpointRow}>
+                  {checkpoints.map(cp => (
+                    <button key={cp.pct} style={s.checkpointBtn} disabled={restoring} onClick={() => setConfirmRestore(cp.pct)}>
+                      ↩ {cp.pct}%
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {confirmRestore !== null && (
+              <div style={s.confirmBox}>
+                <p style={{ marginBottom: 12 }}>Go back to {confirmRestore}%? Everything typed after that point will be removed from your document — you can then resume or stop there.</p>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button style={s.pauseBtn} disabled={restoring} onClick={() => setConfirmRestore(null)}>Cancel</button>
+                  <button style={s.startBtn(true)} disabled={restoring} onClick={() => {
+                    const cp = checkpoints.find(c => c.pct === confirmRestore);
+                    if (cp) restoreToCheckpoint(cp);
+                  }}>{restoring ? "Going back…" : "Yes, go back"}</button>
+                </div>
+              </div>
+            )}
+
             {error && <div style={s.errorBox}>⚠️ {error}</div>}
             {!done ? (
               <>
